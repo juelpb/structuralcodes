@@ -18,9 +18,27 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import warnings
+from pathlib import Path
 from types import SimpleNamespace
+import tempfile
+import uuid
 
 import numpy as np
+
+try:
+    import matplotlib
+    try:
+        matplotlib.use('Agg')  # prefer non-GUI backend to avoid Qt dependency
+    except Exception:
+        pass
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Circle, Rectangle
+except ImportError:  # pragma: no cover - optional dependency
+    matplotlib = None
+    plt = None
+    Circle = None
+    Rectangle = None
 
 from structuralcodes import set_design_code
 from structuralcodes.codes.ec2_2004 import _section_7_3_crack_control as ec2_cr
@@ -30,6 +48,36 @@ from structuralcodes.materials.concrete import create_concrete
 from structuralcodes.materials.reinforcement import create_reinforcement
 from structuralcodes.sections import (GenericSection,
                                       calculate_elastic_cracked_properties)
+
+
+def _maybe_show(show: bool, fig=None, save_path: str | None = None):
+    """Show or save matplotlib figures when interactive backends are unavailable."""
+    if plt is None:
+        return
+    fig = fig or plt.gcf()
+    if fig is None:
+        return
+
+    backend = (plt.get_backend() or '').lower()
+    target_path = Path(save_path) if save_path else None
+
+    if not show and target_path is None:
+        return
+
+    if not show and target_path is not None:
+        fig.savefig(target_path, bbox_inches='tight')
+        return
+
+    if 'agg' in backend or 'template' in backend or backend == 'agg':
+        if target_path is None:
+            target_path = Path(tempfile.gettempdir()) / f'plot_{uuid.uuid4().hex}.png'
+        fig.savefig(target_path, bbox_inches='tight')
+        warnings.warn(
+            f"matplotlib backend '{backend}' is non-interactive; saved figure to {target_path}"
+        )
+        return
+
+    fig.show()
 
 
 @dataclasses.dataclass
@@ -414,15 +462,17 @@ def compute_crack_widths_ec2(
 
 
 def plot_strain_field(
-    section: GenericSection, strain_result, show: bool = True, ax=None
+    section: GenericSection,
+    strain_result,
+    show: bool = True,
+    ax=None,
+    save_path: str | None = None,
 ):
     """Plot the strain field over the concrete polygon (scatter mask)."""
-    try:
-        import matplotlib.pyplot as plt
-    except ImportError as exc:  # pragma: no cover
+    if plt is None:  # pragma: no cover - optional dependency
         raise RuntimeError(
             'matplotlib is required for plotting; install it to enable.'
-        ) from exc
+        )
 
     from shapely.geometry import Point
 
@@ -456,8 +506,7 @@ def plot_strain_field(
     ax.set_xlabel('y [mm]')
     ax.set_ylabel('z [mm]')
     ax.grid(True, linestyle=':')
-    if show:
-        plt.show()
+    _maybe_show(show, fig=ax.figure if ax is not None else None, save_path=save_path)
     return ax
 
 
@@ -467,15 +516,13 @@ def plot_reinf_stress(
     show: bool = True,
     ax=None,
     steel_stresses=None,
+    save_path: str | None = None,
 ):
     """Plot reinforcement stress as colored circles."""
-    try:
-        import matplotlib.pyplot as plt
-        from matplotlib.patches import Circle
-    except ImportError as exc:  # pragma: no cover
+    if plt is None or Circle is None:  # pragma: no cover - optional dependency
         raise RuntimeError(
             'matplotlib is required for plotting; install it to enable.'
-        ) from exc
+        )
 
     if ax is None:
         _, ax = plt.subplots()
@@ -510,8 +557,7 @@ def plot_reinf_stress(
     ax.grid(True, linestyle=':')
     ax.set_xlabel('y [mm]')
     ax.set_ylabel('z [mm]')
-    if show:
-        plt.show()
+    _maybe_show(show, fig=ax.figure if ax is not None else None, save_path=save_path)
     return ax
 
 
@@ -527,9 +573,7 @@ def _render_shear_stirrup(ax, geom: RectangularGeometry, layout: StirrupLayout):
     """Draw a closed stirrup line for visual control."""
     if layout.diameter <= 0:
         return
-    try:
-        from matplotlib.patches import Rectangle
-    except ImportError:
+    if Rectangle is None:
         return
     minx, miny, maxx, maxy = geom.polygon.bounds
     d = layout.diameter
@@ -578,16 +622,14 @@ def render_cross_section(
     show: bool = True,
     ax=None,
     stirrup: StirrupLayout | None = None,
+    save_path: str | None = None,
 ):
     """Render the cross section with concrete, bars, and optional stirrup."""
-    try:
-        import matplotlib.pyplot as plt
-        from matplotlib.patches import Circle, Rectangle
-    except ImportError as exc:  # pragma: no cover - optional feature
+    if plt is None or Circle is None or Rectangle is None:  # pragma: no cover
         raise RuntimeError(
             'matplotlib is required for rendering; install it to enable '
             'visual checks.'
-        ) from exc
+        )
 
     if ax is None:
         _, ax = plt.subplots()
@@ -620,8 +662,7 @@ def render_cross_section(
     ax.set_xlabel('y [mm]')
     ax.set_ylabel('z [mm]')
 
-    if show:
-        plt.show()
+    _maybe_show(show, fig=ax.figure if ax is not None else None, save_path=save_path)
     return ax
 
 
@@ -631,6 +672,7 @@ def render_section_diagram(
     stirrup: StirrupLayout | None = None,
     steel_stresses=None,
     show: bool = True,
+    save_path: str | None = None,
 ):
     """Render a three-part diagram: section, strain, stress (absolute scales).
 
@@ -642,12 +684,10 @@ def render_section_diagram(
         steel_stresses: optional precomputed bar stresses; if None, they are
             computed from strain_result.
     """
-    try:
-        import matplotlib.pyplot as plt
-    except ImportError as exc:  # pragma: no cover
+    if plt is None:  # pragma: no cover - optional dependency
         raise RuntimeError(
             'matplotlib is required for rendering; install it to enable.'
-        ) from exc
+        )
 
     fig, axes = plt.subplots(1, 3, figsize=(13, 4.5))
 
@@ -756,8 +796,7 @@ def render_section_diagram(
     ax3.grid(True, linestyle=':')
 
     fig.tight_layout()
-    if show:
-        plt.show()
+    _maybe_show(show, fig=fig, save_path=save_path)
     return axes
 
 
@@ -766,14 +805,13 @@ def render_fiber_mesh(
     mesh_size: float | None = None,
     show: bool = True,
     ax=None,
+    save_path: str | None = None,
 ):
     """Render the fiber mesh (triangulation) for the section geometry."""
-    try:
-        import matplotlib.pyplot as plt
-    except ImportError as exc:  # pragma: no cover
+    if plt is None:  # pragma: no cover - optional dependency
         raise RuntimeError(
             'matplotlib is required for rendering; install it to enable.'
-        ) from exc
+        )
     try:
         import triangle
     except ImportError as exc:  # pragma: no cover
@@ -806,8 +844,7 @@ def render_fiber_mesh(
     ax.set_xlabel('y [mm]')
     ax.set_ylabel('z [mm]')
     ax.set_title('Fiber mesh')
-    if show:
-        plt.show()
+    _maybe_show(show, fig=ax.figure if ax is not None else None, save_path=save_path)
     return ax
 
 
@@ -848,13 +885,15 @@ def example():
     # render_cross_section(section, stirrup=stirrup)
     # plot_strain_field(section, results['bending_strength'])
     # plot_reinf_stress(section, results['bending_strength'])
-    # render_section_diagram(
-    #     section,
-    #     equilibrium['strain_result'],
-    #     steel_stresses=equilibrium['steel_stresses'],
-    #     stirrup=stirrup,
-    # )
-    render_fiber_mesh(section)
+    render_section_diagram(
+        section,
+        equilibrium['strain_result'],
+        steel_stresses=equilibrium['steel_stresses'],
+        stirrup=stirrup,
+        show=False, 
+        save_path="section_diagram.png"
+    )
+    render_fiber_mesh(section, show=False, save_path="fiber_mesh.png")
 
     return section, results, steel, equilibrium, cracks
 
