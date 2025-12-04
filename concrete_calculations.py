@@ -385,13 +385,12 @@ def compute_crack_widths_ec2(
     steel_stresses=None,
     load_type: str = 'short',
 ) -> dict[str, float]:
-    """Compute crack width at top and bottom using EC2:2004 helpers (simplified).
+    """Compute crack widths using EC2:2004 §7.3.2/7.3.4 (wk = sr,max·(εsm-εcm)).
 
     Returns mm values for 'top' and 'bottom' where tension occurs; otherwise None.
     """
     if steel_stresses is None:
         steel_stresses = compute_steel_stresses(section, strain_result)
-    steel_lookup = {(bar['x_mm'], bar['y_mm']): bar for bar in steel_stresses}
 
     def side_result(side: str):
         data = _collect_side_data(section, side, strain_result)
@@ -413,16 +412,38 @@ def compute_crack_widths_ec2(
         height = data['height']
         chi_y = strain_result.chi_y
         eps_a = strain_result.eps_a
-        z_na = None if chi_y == 0 else -eps_a / chi_y
-        maxz = data['maxz']
-        minz = data['minz']
-        if z_na is None:
-            tension_depth = height / 2
-        elif side == 'top':
-            tension_depth = max(maxz - min(z_na, maxz), 0.0)
+        y_na = None if chi_y == 0 else -eps_a / chi_y
+        tension_face = data['maxz'] if side == 'top' else data['minz']
+        compression_face = data['minz'] if side == 'top' else data['maxz']
+
+        # Distance from tension face to neutral axis (cap to section depth)
+        if y_na is None:
+            tension_depth = height
         else:
-            tension_depth = max(max(z_na, minz) - minz, 0.0)
-        Ac_eff = width * max(tension_depth, 1e-6)
+            raw_depth = (
+                tension_face - y_na if side == 'top' else y_na - tension_face
+            )
+            if raw_depth <= 0:
+                tension_depth = height
+            elif raw_depth >= height:
+                tension_depth = height
+            else:
+                tension_depth = raw_depth
+
+        # Effective depth to tensile reinforcement from compression face
+        centroid_y = (
+            sum((b['bar'].y * (math.pi * b['bar'].diameter ** 2 / 4)) for b in bars)
+            / As_tot
+        )
+        d = (
+            centroid_y - compression_face
+            if side == 'top'
+            else compression_face - centroid_y
+        )
+        h_minus_d = max(height - d, 0.0)
+        # Effective tension area thickness per EC2 §7.3.2
+        h_ceff = max(min(2.5 * h_minus_d, tension_depth / 3, height / 2), 0.0)
+        Ac_eff = width * max(h_ceff, 1e-9)
         rho_p_eff = As_tot / Ac_eff if Ac_eff > 0 else 0
         if rho_p_eff <= 0:
             return None
@@ -435,6 +456,7 @@ def compute_crack_widths_ec2(
         Es = bars[0]['bar'].material.constitutive_law.get_tangent(eps=0)
         Ecm = getattr(concrete, 'Ecm', 30000)
         alpha_e = Es / Ecm
+        x_depth = height - tension_depth  # depth of NA from compression face
 
         spacing_threshold = ec2_cr.w_spacing(cover, phi)
         if spacing == 0:
@@ -442,8 +464,7 @@ def compute_crack_widths_ec2(
         if spacing <= spacing_threshold:
             sr_max = ec2_cr.sr_max_close(cover, phi, rho_p_eff, k1, k2)
         else:
-            x = height - tension_depth
-            sr_max = ec2_cr.sr_max_far(height, x)
+            sr_max = ec2_cr.sr_max_far(height, x_depth)
 
         sigma_s = max(b['sigma'] for b in bars if b['sigma'] > 0) if bars else 0
         if sigma_s <= 0:
@@ -864,7 +885,7 @@ def example():
         stirrup_diameter=20,
         stirrup_spacing=150,
     )
-    load = LoadState(m_y=200)
+    load = LoadState(m_y=100)
 
     section = build_section(cfg)
     results = solve_bending_and_mc(section, load)
